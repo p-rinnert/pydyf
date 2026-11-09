@@ -436,6 +436,11 @@ class Array(Object, list):
 
 class PDF:
     """PDF document."""
+
+    #: Maximum number of objects stored in each object stream when the PDF is
+    #: written with ``compress=True``.
+    object_stream_size = 100
+
     def __init__(self):
         """Create a PDF document."""
 
@@ -541,35 +546,43 @@ class PDF:
                     object_.offset = self.current_position
                     self.write_line(object_.indirect, output)
 
-            # Write compressed objects in object stream.
-            stream = []
-            object_index_list = []
-            position = 0
-            for i, object_ in enumerate(compressed_objects):
-                data = object_.data
-                stream.append(data)
-                object_index_list.append(object_.number)
-                object_index_list.append(position)
-                position += len(data) + 1
-            object_index_string = ' '.join(str(i) for i in object_index_list)
-            stream.insert(0, object_index_string)
-            extra = {
-                'Type': '/ObjStm',
-                'N': len(compressed_objects),
-                'First': len(object_index_string) + 1,
-            }
-            object_stream = Stream(stream, extra, compress)
-            object_stream.offset = self.current_position
-            self.add_object(object_stream)
-            self.write_line(object_stream.indirect, output)
+            # Write compressed objects in object streams. Streams are kept
+            # small, as some readers decode a whole object stream each time
+            # they need one of its objects.
+            positions = {}
+            for start in range(
+                    0, len(compressed_objects), self.object_stream_size):
+                chunk = compressed_objects[
+                    start:start + self.object_stream_size]
+                stream = []
+                object_index_list = []
+                position = 0
+                for object_ in chunk:
+                    data = object_.data
+                    stream.append(data)
+                    object_index_list.append(object_.number)
+                    object_index_list.append(position)
+                    position += len(data) + 1
+                object_index_string = ' '.join(
+                    str(i) for i in object_index_list)
+                stream.insert(0, object_index_string)
+                extra = {
+                    'Type': '/ObjStm',
+                    'N': len(chunk),
+                    'First': len(object_index_string) + 1,
+                }
+                object_stream = Stream(stream, extra, compress)
+                object_stream.offset = self.current_position
+                self.add_object(object_stream)
+                self.write_line(object_stream.indirect, output)
+                for index, object_ in enumerate(chunk):
+                    positions[object_.number] = (object_stream.number, index)
 
             # Write cross-reference stream.
             xref = []
-            dict_index = 0
             for object_ in self.objects:
-                if object_.compressible:
-                    xref.append((2, object_stream.number, dict_index))
-                    dict_index += 1
+                if object_.number in positions:
+                    xref.append((2, *positions[object_.number]))
                 else:
                     xref.append((
                         bool(object_.number), object_.offset, object_.generation))
@@ -579,7 +592,7 @@ class PDF:
             max_generation = max(
                 object_.generation for object_ in self.objects)
             field3_size = ceil(log(
-                max(max_generation, len(compressed_objects)) + 1, 256))
+                max(max_generation, self.object_stream_size) + 1, 256))
             xref_lengths = (1, field2_size, field3_size)
             xref_stream = b''.join(
                 value.to_bytes(length, 'big')

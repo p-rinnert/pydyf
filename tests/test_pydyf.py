@@ -1342,3 +1342,25 @@ def test_string_encoding(string, data):
 ])
 def test_name_object(string, name):
     assert pydyf.name(string) == name
+
+
+
+@pytest.mark.parametrize(('pages', 'size'), [(1, 100), (150, 100), (10, 4)])
+def test_object_stream_size(pages, size):
+    document = pydyf.PDF()
+    document.object_stream_size = size
+    for _ in range(pages):
+        document.add_page(pydyf.Dictionary({
+            'Type': '/Page',
+            'Parent': document.pages.reference,
+            'MediaBox': pydyf.Array([0, 0, 10, 10]),
+        }))
+    pdf = io.BytesIO()
+    document.write(pdf, compress=True)
+    counts = [
+        int(count) for count in
+        re.findall(rb'/Type /ObjStm\s*/N (\d+)', pdf.getvalue())]
+    # Catalog, page tree and pages are compressed, split in bounded streams.
+    assert sum(counts) == pages + 2
+    assert max(counts) <= size
+    assert len(counts) == -(-(pages + 2) // size)
